@@ -1,0 +1,14 @@
+# AstrBot 插件「开字母小游戏」依赖清单
+# 安装：pip install -r requirements.txt（AstrBot 插件管理器会自动读取）
+#
+# Pillow      题板与帮助图片渲染
+# requests    曲目巡检、题库上传
+# pypinyin    中文曲名转拼音，用于猜题匹配
+# pykakasi    日文曲名转罗马音，用于猜题匹配
+# openpyxl    导出别名 Excel
+
+Pillow>=9.0.0
+requests>=2.25.0
+pypinyin>=0.49.0
+pykakasi>=2.2.0
+openpyxl>=3.0.0

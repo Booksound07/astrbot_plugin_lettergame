@@ -1,0 +1,4 @@
+all_songs = {}
+all_songs["all"] = song_db["Phigros"]
+with open("banks/all.json","w",encoding="utf-8") as f:
+    json.dump(all_songs,f,ensure_ascii=False)

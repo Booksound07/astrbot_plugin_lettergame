@@ -1,0 +1,6 @@
+name: astrbot_plugin_lettergame
+display_name: 开字母小游戏
+version: "3.0.0"
+description: 提供多人开字母游戏功能
+author: ChatGPT & DeepSeek & Booksound07
+repo: "https://github.com/Booksound07/astrbot_plugin_lettergame"
