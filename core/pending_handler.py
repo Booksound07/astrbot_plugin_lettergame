@@ -25,6 +25,12 @@ async def handle_pending_query(event, text, key):
     # 群聊必须 @（或唤醒），否则不把这条消息当序号输入
     if require_group_at(event):
         return False
+
+    # 空文本直接放行：插件注入的合成事件、平台心跳等没有真实内容，
+    # 不能把它当成“用户输错序号”去提示。
+    if not (text or "").strip():
+        return False
+
     data = get_pending_query(key)
     if not data:
         return False
@@ -49,7 +55,10 @@ async def handle_pending_query(event, text, key):
 
     idx = int(text) - 1
     if not (0 <= idx < len(data["songs"])):
-        await event.send(event.plain_result("请输入正确序号"))
+        total = len(data["songs"])
+        await event.send(
+            event.plain_result(f"请输入正确序号（1-{total}）")
+        )
         return True
 
     song = data["songs"][idx]
