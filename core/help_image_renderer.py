@@ -56,8 +56,6 @@ TOP_MARGIN = 40
 CARD_GAP = 12
 SECTION_GAP = 35
 
-PLUGIN_NAME = ""
-
 HELP_DATA = [
     {
         "title": "开始游戏",
@@ -158,7 +156,7 @@ def render_help_image() -> str:
 
     width = CARD_WIDTH + LEFT_MARGIN * 2
 
-    height = 180
+    height = 250
 
     for section in HELP_DATA:
         height += 45
