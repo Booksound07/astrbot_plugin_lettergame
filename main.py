@@ -609,8 +609,16 @@ class LetterGame(Star):
         # 开字母期间，普通消息不交给 LLM
         event.call_llm = False
 
-        # 如果自动监听成功答对，阻止后续插件继续处理
-        if found:
+        # 明确以数字开头的作答消息（「11 atrr」「1. xxx」，以及「22085」这种
+        # 答案本身是纯数字的情况）：不管答对答错都到此为止，
+        # 避免答错时事件继续往下走被别的插件接话。
+        # 不以数字开头的普通聊天不受影响，仍交给其他插件。
+        looks_like_answer = re.match(
+            r"^\d+(?:[.、．。)\]）]|\s|$)",
+            text
+        ) is not None
+
+        if found or looks_like_answer:
             event.stop_event()
             return
 
