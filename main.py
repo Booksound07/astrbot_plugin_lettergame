@@ -2448,6 +2448,29 @@ class LetterGame(Star):
             lines.append(f"{i}. {song['title']}")
         await event.send(event.plain_result("\n".join(lines)))
 
+        # 到点主动提示超时，不再依赖“下一条消息”来触发检查
+        asyncio.create_task(
+            self._pending_query_timeout(event, key, PENDING_QUERY_TIMEOUT)
+        )
+
+    async def _pending_query_timeout(self, event, key, timeout: int):
+        """等超时后主动提示 /查曲 多选已过期（不靠下一条消息触发）"""
+        await asyncio.sleep(timeout + 2)
+
+        data = get_pending_query(key)
+        if not data:
+            return
+        if time.time() < data.get("expire", 0):
+            return
+
+        remove_pending_query(key)
+        try:
+            await event.send(
+                event.plain_result("选择已超时，请重新使用 /查曲。")
+            )
+        except Exception as e:
+            logger.warning(f"[开字母] 查曲超时提示发送失败：{repr(e)}")
+
     # ---------------------- 加别名 ----------------------
     @filter.command("加别名", alias={"addalias"})
     async def add_alias(self, event: AstrMessageEvent):
