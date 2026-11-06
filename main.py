@@ -328,6 +328,7 @@ class LetterGame(Star):
                     "awaiting_del_confirm",
                     "awaiting_import_confirm",
                     "awaiting_open_limit",
+                    "awaiting_bank_import",
                 ]
             ):
                 clear_upload_state(umo)
@@ -679,7 +680,19 @@ class LetterGame(Star):
             )
 
         # ============================================================
-        # 2. 导入别名 Excel
+        # 2. 导入题库 Excel
+        # ============================================================
+        elif step == "awaiting_bank_import":
+
+            handled = await self._import_bank_from_file(
+                event,
+                user_id,
+                umo,
+                upload_state
+            )
+
+        # ============================================================
+        # 3. 导入别名 Excel
         # ============================================================
         elif step == "awaiting_import_file":
 
@@ -3052,10 +3065,10 @@ class LetterGame(Star):
             _json.dump(songs, fp, ensure_ascii=False, indent=2)
         return added
 
-    # ---------------------- 内置题库导入 ----------------------
+    # ---------------------- 题库导入（Excel） ----------------------
     @filter.command("导入题库")
     async def import_builtin_bank(self, event: AstrMessageEvent, args: str = ""):
-        """把插件自带的内置题库导入到 plugin_data（仅管理员）"""
+        """用 Excel 导入或覆盖题库（仅管理员）"""
         event.call_llm = False
         event.stop_event()
 
@@ -3063,100 +3076,117 @@ class LetterGame(Star):
             await event.send(event.plain_result("只有管理员能用这个指令。"))
             return
 
-        import json as _json
-        from .core.paths import BANK_DIR, BUNDLED_BANK_DIR, ALIAS_DIR, iter_bundled_banks
-        from .core.excel_parser import split_aliases
+        from .core.paths import BANK_DIR
 
-        builtin = [d.name for d in iter_bundled_banks()]
-        if not builtin:
-            await event.send(event.plain_result("插件里没有找到内置题库。"))
-            return
+        names = []
+        if BANK_DIR.is_dir():
+            names = [d.name for d in sorted(BANK_DIR.iterdir()) if d.is_dir()]
 
         parts = (args or "").strip().split()
         if not parts:
             lines = [
-                "用法：/导入题库 [内置题库名]",
+                "用法：/导入题库 [题库名]，随后发送 Excel 文件。",
                 "",
-                "内置题库：",
+                "Excel 表头需要：曲名、是否是标准曲名，可选一列别名。",
+                "写入已存在内置题库名会覆盖该题库现有数据，且无法撤销。",
+                "",
             ]
-            for name in builtin:
-                exist = (BANK_DIR / name / "songs.json").exists()
-                lines.append(f"· {name}" + ("（已存在）" if exist else ""))
+            if names:
+                lines.append("现有题库：")
+                lines.extend(f"· {n}" for n in names)
+            else:
+                lines.append("当前还没有题库，在 /导入题库 后填入新名字以新建。")
             await event.send(event.plain_result("\n".join(lines)))
             return
 
-        name = parts[0]
-        force = any(p in ("确认", "force", "--force", "-f") for p in parts[1:])
-
-        if name not in builtin:
-            await event.send(event.plain_result(f"没有这个内置题库：{name}"))
+        name = parts[0].strip()
+        if not name or any(ch in name for ch in ("/", "\\", "..", "\0")):
+            await event.send(event.plain_result("题库名不能包含斜杠或点。"))
             return
 
-        src = BUNDLED_BANK_DIR / name / "songs.json"
-        if not src.is_file():
-            await event.send(event.plain_result(f"内置题库 {name} 的文件缺失，无法导入。"))
-            return
+        exist = (BANK_DIR / name / "songs.json").exists()
+        set_upload_state(event.unified_msg_origin, {
+            "step": "awaiting_bank_import",
+            "bank_name": name,
+        })
 
-        dst_dir = BANK_DIR / name
-        dst_file = dst_dir / "songs.json"
+        head = ""
+        if exist:
+            head = "⚠️ 该题库已存在，导入会覆盖现有数据，且无法撤销。\n\n"
 
-        if dst_file.exists() and not force:
-            old_count = -1
-            try:
-                with open(dst_file, "r", encoding="utf-8") as fp:
-                    old_count = len(_json.load(fp))
-            except Exception:
-                pass
-            count_text = f"现有 {old_count} 首，" if old_count >= 0 else ""
-            await event.send(event.plain_result(
-                f"⚠️ 内置题库 {name} 已存在，{count_text}导入会覆盖现有数据，且无法撤销。\n\n"
-                f"确认覆盖请输入：/导入题库 {name} 确认\n"
-                f"不导入则忽略本条消息。"
-            ))
-            return
+        await event.send(event.plain_result(
+            f"{head}请发送 Excel 文件，表头需要：曲名、是否是标准曲名，可选一列别名。\n"
+            f"发送 取消 可中止。"
+        ))
+
+    async def _import_bank_from_file(self, event, user_id, umo, upload_state):
+        """收到 Excel 后写入题库"""
+        import asyncio as _asyncio
+        import json as _json
+        import time as _time
+        import requests as _requests
+        from .core.paths import BANK_DIR, ALIAS_DIR, PLUGIN_DATA_DIR
+        from .core.excel_parser import parse_excel
+
+        name = str(upload_state.get("bank_name", "")).strip()
+        if not name:
+            clear_upload_state(umo)
+            await event.send(event.plain_result("导入目标丢失，请重新使用 /导入题库。"))
+            return True
+
+        file_comp = None
+        for comp in event.message_obj.message:
+            if comp.type == "File":
+                file_comp = comp
+                break
+        if file_comp is None:
+            return False
+
+        temp_dir = PLUGIN_DATA_DIR / "tmp"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        temp_path = temp_dir / f"bank_import_{user_id}_{int(_time.time())}.xlsx"
+
+        def _fetch(url, dest, timeout=30):
+            resp = _requests.get(url, timeout=timeout)
+            with open(dest, "wb") as fp:
+                fp.write(resp.content)
 
         try:
-            with open(src, "r", encoding="utf-8") as fp:
-                songs = _json.load(fp)
+            await _asyncio.to_thread(_fetch, file_comp.url, temp_path)
         except Exception as e:
-            await event.send(event.plain_result(f"内置题库 {name} 读取失败：{e}"))
-            return
+            clear_upload_state(umo)
+            logger.error(f"[LetterGame] 题库文件下载失败: {e}")
+            await event.send(event.plain_result(f"文件下载失败：{e}"))
+            return True
 
-        if not isinstance(songs, list):
-            await event.send(event.plain_result(f"内置题库 {name} 的数据格式不正确，不是曲目列表。"))
-            return
+        try:
+            songs, duplicates, _headers, alias_map = parse_excel(
+                temp_path, "曲名", "是否是标准曲名"
+            )
+        except Exception as e:
+            clear_upload_state(umo)
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+            await event.send(event.plain_result(
+                f"Excel 解析失败：{e}\n请确认表头有 曲名 和 是否是标准曲名 两列。"
+            ))
+            return True
 
-        clean = []
-        alias_map = {}
-        for item in songs:
-            if isinstance(item, str):
-                clean.append({"title": item, "is_standard": True})
-                continue
-            if not isinstance(item, dict):
-                continue
-            entry = dict(item)
-            raw_alias = None
-            for key in list(entry.keys()):
-                if str(key).strip().lower() in ("aliases", "alias", "别名", "别称"):
-                    raw_alias = entry.pop(key)
-                    break
-            title = str(entry.get("title", "")).strip()
-            if not title:
-                continue
-            clean.append(entry)
-            if raw_alias:
-                if isinstance(raw_alias, (list, tuple)):
-                    pieces = [str(x).strip() for x in raw_alias if str(x).strip()]
-                elif isinstance(raw_alias, str):
-                    pieces = split_aliases(raw_alias)
-                else:
-                    pieces = []
-                if pieces:
-                    alias_map[title] = pieces
+        if not songs:
+            clear_upload_state(umo)
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+            await event.send(event.plain_result("Excel 里没有读取到曲目，已中止。"))
+            return True
 
+        dst_dir = BANK_DIR / name
         dst_dir.mkdir(parents=True, exist_ok=True)
-        with open(dst_file, "w", encoding="utf-8") as fp:
-            _json.dump(clean, fp, ensure_ascii=False, indent=2)
+        with open(dst_dir / "songs.json", "w", encoding="utf-8") as fp:
+            _json.dump(songs, fp, ensure_ascii=False, indent=2)
 
         alias_added = 0
         if alias_map:
@@ -3182,11 +3212,20 @@ class LetterGame(Star):
                 _json.dump(current, fp, ensure_ascii=False, indent=2)
 
         bank_manager.force_reload()
+        clear_upload_state(umo)
 
-        text = f"已导入内置题库 {name}，共 {len(clean)} 首。"
+        try:
+            temp_path.unlink()
+        except OSError:
+            pass
+
+        text = f"已导入题库 {name}，共 {len(songs)} 首。"
         if alias_added:
             text += f"\n写入别名 {alias_added} 条。"
+        if duplicates:
+            text += f"\n有 {len(duplicates)} 个标准曲名重复，已按文件内容写入。"
         await event.send(event.plain_result(text))
+        return True
 
     # ---------------------- 内置题库导出 ----------------------
     @filter.command("导出题库")
