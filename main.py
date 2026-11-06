@@ -3052,6 +3052,240 @@ class LetterGame(Star):
             _json.dump(songs, fp, ensure_ascii=False, indent=2)
         return added
 
+    # ---------------------- 内置题库导入 ----------------------
+    @filter.command("导入题库")
+    async def import_builtin_bank(self, event: AstrMessageEvent, args: str = ""):
+        """把插件自带的内置题库导入到 plugin_data（仅管理员）"""
+        event.call_llm = False
+        event.stop_event()
+
+        if not self.is_plugin_admin(event):
+            await event.send(event.plain_result("只有管理员能用这个指令。"))
+            return
+
+        import json as _json
+        from .core.paths import BANK_DIR, BUNDLED_BANK_DIR, ALIAS_DIR, iter_bundled_banks
+        from .core.excel_parser import split_aliases
+
+        builtin = [d.name for d in iter_bundled_banks()]
+        if not builtin:
+            await event.send(event.plain_result("插件里没有找到内置题库。"))
+            return
+
+        parts = (args or "").strip().split()
+        if not parts:
+            lines = [
+                "用法：/导入题库 [内置题库名]",
+                "",
+                "内置题库：",
+            ]
+            for name in builtin:
+                exist = (BANK_DIR / name / "songs.json").exists()
+                lines.append(f"· {name}" + ("（已存在）" if exist else ""))
+            await event.send(event.plain_result("\n".join(lines)))
+            return
+
+        name = parts[0]
+        force = any(p in ("确认", "force", "--force", "-f") for p in parts[1:])
+
+        if name not in builtin:
+            await event.send(event.plain_result(f"没有这个内置题库：{name}"))
+            return
+
+        src = BUNDLED_BANK_DIR / name / "songs.json"
+        if not src.is_file():
+            await event.send(event.plain_result(f"内置题库 {name} 的文件缺失，无法导入。"))
+            return
+
+        dst_dir = BANK_DIR / name
+        dst_file = dst_dir / "songs.json"
+
+        if dst_file.exists() and not force:
+            old_count = -1
+            try:
+                with open(dst_file, "r", encoding="utf-8") as fp:
+                    old_count = len(_json.load(fp))
+            except Exception:
+                pass
+            count_text = f"现有 {old_count} 首，" if old_count >= 0 else ""
+            await event.send(event.plain_result(
+                f"⚠️ 内置题库 {name} 已存在，{count_text}导入会覆盖现有数据，且无法撤销。\n\n"
+                f"确认覆盖请输入：/导入题库 {name} 确认\n"
+                f"不导入则忽略本条消息。"
+            ))
+            return
+
+        try:
+            with open(src, "r", encoding="utf-8") as fp:
+                songs = _json.load(fp)
+        except Exception as e:
+            await event.send(event.plain_result(f"内置题库 {name} 读取失败：{e}"))
+            return
+
+        if not isinstance(songs, list):
+            await event.send(event.plain_result(f"内置题库 {name} 的数据格式不正确，不是曲目列表。"))
+            return
+
+        clean = []
+        alias_map = {}
+        for item in songs:
+            if isinstance(item, str):
+                clean.append({"title": item, "is_standard": True})
+                continue
+            if not isinstance(item, dict):
+                continue
+            entry = dict(item)
+            raw_alias = None
+            for key in list(entry.keys()):
+                if str(key).strip().lower() in ("aliases", "alias", "别名", "别称"):
+                    raw_alias = entry.pop(key)
+                    break
+            title = str(entry.get("title", "")).strip()
+            if not title:
+                continue
+            clean.append(entry)
+            if raw_alias:
+                if isinstance(raw_alias, (list, tuple)):
+                    pieces = [str(x).strip() for x in raw_alias if str(x).strip()]
+                elif isinstance(raw_alias, str):
+                    pieces = split_aliases(raw_alias)
+                else:
+                    pieces = []
+                if pieces:
+                    alias_map[title] = pieces
+
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        with open(dst_file, "w", encoding="utf-8") as fp:
+            _json.dump(clean, fp, ensure_ascii=False, indent=2)
+
+        alias_added = 0
+        if alias_map:
+            ALIAS_DIR.mkdir(parents=True, exist_ok=True)
+            af = ALIAS_DIR / f"{name}.json"
+            current = {}
+            if af.exists():
+                try:
+                    with open(af, "r", encoding="utf-8") as fp:
+                        current = _json.load(fp)
+                except Exception:
+                    current = {}
+            if not isinstance(current, dict):
+                current = {}
+            for title, pieces in alias_map.items():
+                merged = list(current.get(title, []) or [])
+                for piece in pieces:
+                    if piece not in merged:
+                        merged.append(piece)
+                        alias_added += 1
+                current[title] = merged
+            with open(af, "w", encoding="utf-8") as fp:
+                _json.dump(current, fp, ensure_ascii=False, indent=2)
+
+        bank_manager.force_reload()
+
+        text = f"已导入内置题库 {name}，共 {len(clean)} 首。"
+        if alias_added:
+            text += f"\n写入别名 {alias_added} 条。"
+        await event.send(event.plain_result(text))
+
+    # ---------------------- 内置题库导出 ----------------------
+    @filter.command("导出题库")
+    async def export_builtin_bank(self, event: AstrMessageEvent, args: str = ""):
+        """把题库导出为三列 CSV：曲名、是否是标准曲名、别名（仅管理员）"""
+        event.call_llm = False
+        event.stop_event()
+
+        if not self.is_plugin_admin(event):
+            await event.send(event.plain_result("只有管理员能用这个指令。"))
+            return
+
+        import csv as _csv
+        import json as _json
+        import time as _time
+        from .core.paths import BANK_DIR, ALIAS_DIR, PLUGIN_DATA_DIR
+
+        names = []
+        if BANK_DIR.is_dir():
+            names = [d.name for d in sorted(BANK_DIR.iterdir()) if d.is_dir()]
+
+        if not names:
+            await event.send(event.plain_result("当前没有可导出的题库。"))
+            return
+
+        parts = (args or "").strip().split()
+        if not parts:
+            await event.send(event.plain_result(
+                "用法：/导出题库 [内置题库名]\n"
+                "导出三列：曲名、是否是标准曲名、别名。\n\n"
+                "现有题库：\n" + "\n".join(f"· {n}" for n in names)
+            ))
+            return
+
+        name = parts[0]
+        if name not in names:
+            await event.send(event.plain_result(f"没有这个内置题库：{name}"))
+            return
+
+        songs_file = BANK_DIR / name / "songs.json"
+        if not songs_file.is_file():
+            await event.send(event.plain_result(f"内置题库 {name} 中不包含曲目数据。"))
+            return
+
+        try:
+            with open(songs_file, "r", encoding="utf-8") as fp:
+                songs = _json.load(fp)
+        except Exception as e:
+            await event.send(event.plain_result(f"内置题库 {name} 读取失败：{e}"))
+            return
+
+        alias_data = {}
+        af = ALIAS_DIR / f"{name}.json"
+        if af.is_file():
+            try:
+                with open(af, "r", encoding="utf-8") as fp:
+                    alias_data = _json.load(fp)
+            except Exception:
+                alias_data = {}
+        if not isinstance(alias_data, dict):
+            alias_data = {}
+
+        export_dir = PLUGIN_DATA_DIR / "exports"
+        export_dir.mkdir(parents=True, exist_ok=True)
+        out_file = export_dir / f"{name}_{_time.strftime('%Y%m%d_%H%M%S')}.csv"
+
+        rows = 0
+        with open(out_file, "w", encoding="utf-8-sig", newline="") as fp:
+            writer = _csv.writer(fp)
+            writer.writerow(["曲名", "是否是标准曲名", "别名"])
+            for item in songs:
+                if isinstance(item, str):
+                    title = item.strip()
+                    standard = True
+                elif isinstance(item, dict):
+                    title = str(item.get("title", "")).strip()
+                    standard = item.get("is_standard", True)
+                else:
+                    continue
+                if not title:
+                    continue
+                aliases = alias_data.get(title, []) or []
+                if not isinstance(aliases, list):
+                    aliases = [str(aliases)]
+                writer.writerow([
+                    title,
+                    "是" if standard else "否",
+                    "，".join(str(a) for a in aliases),
+                ])
+                rows += 1
+
+        await event.send(event.plain_result(
+            f"已导出内置题库 {name}，共 {rows} 首。\n"
+            f"文件：{out_file}\n\n"
+            f"用 Excel 打开后另存为 xlsx，即可用 /上传题库 导回。"
+        ))
+
+
+
     @filter.command("曲目待审", alias={"songpending"})
     async def list_pending_songs(self, event: AstrMessageEvent):
         event.call_llm = False
