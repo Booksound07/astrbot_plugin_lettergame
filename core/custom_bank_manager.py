@@ -1,10 +1,70 @@
 import json
+import re
 import time
 import shutil
 from pathlib import Path
 
 PLUGIN_DATA_DIR = Path.home() / ".astrbot" / "data" / "plugin_data" / "astrbot_plugin_lettergame"
-CUSTOM_BANK_DIR = PLUGIN_DATA_DIR / "custom_banks"
+# ========== 目录安全防护 ==========
+_SAFE_SEG = re.compile(r"^[0-9A-Za-z_.\-]{1,64}$")
+
+
+def _check_segment(seg) -> str:
+    """只允许字母数字下划线点和短横；拦住 ../ 和绝对路径，防目录穿越"""
+    text = str(seg)
+    if text in (".", "..") or not _SAFE_SEG.match(text) or "/" in text or "\\" in text:
+        raise ValueError("非法的题库路径片段: %r" % text)
+    return text
+
+
+class _SafeBankRoot:
+    """CUSTOM_BANK_DIR 的安全包装：每一次路径拼接都校验片段"""
+
+    __slots__ = ("_path",)
+
+    def __init__(self, path):
+        object.__setattr__(self, "_path", path)
+
+    def __truediv__(self, other):
+        return _SafeBankRoot(self._path / _check_segment(other))
+
+    def __fspath__(self):
+        return str(self._path)
+
+    def __str__(self):
+        return str(self._path)
+
+    def __eq__(self, other):
+        return self._path == other
+
+    def __hash__(self):
+        return hash(self._path)
+
+    def __getattr__(self, name):
+        return getattr(object.__getattribute__(self, "_path"), name)
+
+    def __repr__(self):
+        return f"_SafeBankRoot({self._path!r})"
+
+
+def safe_rmtree(target):
+    """删除题库目录前，先确认目标确实落在 plugin_data 内"""
+    p = Path(target)
+    try:
+        resolved = p.resolve()
+    except OSError:
+        return False
+    root = PLUGIN_DATA_DIR.resolve()
+    if resolved == root or root not in resolved.parents:
+        raise ValueError("拒绝删除 plugin_data 之外的路径: %s" % resolved)
+    if p.exists():
+        safe_rmtree(p)
+        return True
+    return False
+
+
+CUSTOM_BANK_DIR = _SafeBankRoot(PLUGIN_DATA_DIR / "custom_banks")
+
 GLOBAL_INDEX_FILE = CUSTOM_BANK_DIR / "index.json"
 
 # ========== 确保目录存在 ==========
@@ -146,7 +206,7 @@ def overwrite_bank(user_id: str, bank_id: int, name: str, songs: list, meta_info
             alias_backup = json.load(f)
 
     # 删除旧数据
-    shutil.rmtree(bank_dir)
+    safe_rmtree(bank_dir)
     bank_dir.mkdir(parents=True, exist_ok=True)
 
     # 保存 songs.json
@@ -255,7 +315,7 @@ def delete_bank(user_id: str, bank_id: int) -> bool:
     # 删除目录
     bank_dir = CUSTOM_BANK_DIR / user_id / str(bank_id)
     if bank_dir.exists():
-        shutil.rmtree(bank_dir)
+        safe_rmtree(bank_dir)
     
     # 从全局索引移除
     index["banks"] = [b for b in index["banks"] if b["id"] != bank_id]

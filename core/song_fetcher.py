@@ -20,10 +20,7 @@ except Exception:
     def strip_trailing_brackets(t):
         return str(t).strip()
 
-BANK_DIR = (
-    Path.home() / ".astrbot" / "data" / "plugins"
-    / "astrbot_plugin_lettergame" / "banks"
-)
+from .paths import BANK_DIR
 DATA_DIR = (
     Path.home() / ".astrbot" / "data" / "plugin_data"
     / "astrbot_plugin_lettergame"

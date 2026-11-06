@@ -2,23 +2,7 @@ from pathlib import Path
 import json
 import time
 
-BANK_DIR = (
-    Path.home()
-    / ".astrbot"
-    / "data"
-    / "plugins"
-    / "astrbot_plugin_lettergame"
-    / "banks"
-)
-
-ALIAS_DIR = (
-    Path.home()
-    / ".astrbot"
-    / "data"
-    / "plugin_data"
-    / "astrbot_plugin_lettergame"
-    / "aliases"
-)
+from .paths import BANK_DIR, ALIAS_DIR
 
 class SongBankManager:
 

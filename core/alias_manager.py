@@ -117,7 +117,7 @@ def _norm_title(title):
 
 
 def _iter_bank_songs():
-    banks_root = Path(__file__).parent.parent / "banks"
+    from .paths import BANK_DIR as banks_root
     if not banks_root.is_dir():
         return
     for d in sorted(banks_root.iterdir()):
