@@ -3,6 +3,8 @@ import json
 import os
 import tempfile
 
+from astrbot.api import logger
+
 DATA_DIR = (
     Path.home()
     / ".astrbot"

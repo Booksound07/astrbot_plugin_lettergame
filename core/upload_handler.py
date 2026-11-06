@@ -1,3 +1,4 @@
+import asyncio
 import time
 import requests
 import json
@@ -24,6 +25,14 @@ PLUGIN_TEMP_DIR = Path.home() / ".astrbot" / "data" / "plugin_data" / "astrbot_p
 # 全局状态（由 main.py 传入）
 pending_upload = {}
 
+def _download_to_file(url: str, dest: Path, timeout: int = 30) -> Path:
+    """同步下载并写入磁盘；该函数会阻塞，调用方必须用 asyncio.to_thread 包一层。"""
+    resp = requests.get(url, timeout=timeout)
+    with open(dest, "wb") as f:
+        f.write(resp.content)
+    return dest
+
+
 def get_upload_state(umo: str):
     return pending_upload.get(umo)
 
@@ -47,18 +56,13 @@ async def handle_upload_file(event, user_id, umo, text, upload_state):
         if comp.type == "File":
             has_file = True
 
-            response = requests.get(
-                comp.url,
-                timeout=30
-            )
-
             temp_path = (
                 PLUGIN_TEMP_DIR
                 / f"{user_id}_{int(time.time())}.xlsx"
             )
 
-            with open(temp_path, "wb") as f:
-                f.write(response.content)
+            # 下载和落盘放进线程，避免同步 requests 阻塞事件循环
+            await asyncio.to_thread(_download_to_file, comp.url, temp_path)
 
             file_path = temp_path
             break
@@ -322,18 +326,13 @@ async def handle_import_file(event, user_id, umo, text, upload_state):
         if comp.type == "File":
             has_file = True
 
-            response = requests.get(
-                comp.url,
-                timeout=30
-            )
-
             temp_path = (
                 PLUGIN_TEMP_DIR
                 / f"{user_id}_import_{int(time.time())}.xlsx"
             )
 
-            with open(temp_path, "wb") as f:
-                f.write(response.content)
+            # 下载和落盘放进线程，避免同步 requests 阻塞事件循环
+            await asyncio.to_thread(_download_to_file, comp.url, temp_path)
 
             file_path = temp_path
             break
