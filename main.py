@@ -3312,7 +3312,7 @@ class LetterGame(Star):
             except asyncio.CancelledError:
                 return
             try:
-                res = song_fetcher.run_once(pages=1)
+                res = await asyncio.to_thread(lambda: song_fetcher.run_once(pages=1))
                 logger.info(
                     f"[LetterGame] 曲目巡检完成 added={res.get('added')} "
                     f"per_game={res.get('per_game')}"
