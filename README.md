@@ -206,7 +206,7 @@
 
 ## 数据存储
 
-- 内置题库：`plugins/astrbot_plugin_lettergame/banks/<题库名>/songs.json`
+- 内置题库：`plugins/astrbot_plugin_lettergame/banks/<题库名>/songs.json`，首次启动时会被复制到`data/plugin_data/astrbot_plugin_lettergame/banks/对应题库名`
 - 运行时数据：`data/plugin_data/astrbot_plugin_lettergame/`
   - `custom_banks/`：自定义题库与全局索引
   - 预设题目、别名审核记录、曲目审核记录、每日挑战记录、用户设置等
