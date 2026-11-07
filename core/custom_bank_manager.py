@@ -58,7 +58,7 @@ def safe_rmtree(target):
     if resolved == root or root not in resolved.parents:
         raise ValueError("拒绝删除 plugin_data 之外的路径: %s" % resolved)
     if p.exists():
-        safe_rmtree(p)
+        shutil.rmtree(p)
         return True
     return False
 
