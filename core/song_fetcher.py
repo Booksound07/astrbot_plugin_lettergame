@@ -33,6 +33,11 @@ BILI_UIDS = {
 }
 
 OPUS_API = "https://api.bilibili.com/x/polymer/web-dynamic/v1/opus/feed/space"
+# 动态列表：图文和视频投稿都在里面，视频简介挂在 major.archive.desc
+DYNAMIC_API = "https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space"
+# 动态里的视频简介只给前 255 字，要完整的得按 bvid 再查一次
+VIDEO_VIEW_API = "https://api.bilibili.com/x/web-interface/view"
+DESC_TRUNCATED_LEN = 250
 
 _MIXIN_TAB = [
     46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35,
@@ -141,6 +146,103 @@ def fetch_opus(game, pages=1, retries=3):
             continue
         time.sleep(1 + random.random())
     return texts
+
+
+def _fetch_full_desc(session, bvid, retries=2):
+    """动态接口的视频简介会被截到 255 字，用 bvid 去视频详情把完整版要回来"""
+    if not bvid:
+        return ""
+    for _ in range(retries):
+        try:
+            r = session.get(VIDEO_VIEW_API, params={"bvid": bvid}, timeout=12)
+            j = r.json()
+            if j.get("code") == 0:
+                full = str((j.get("data") or {}).get("desc") or "")
+                if full:
+                    return full
+        except Exception:
+            pass
+        time.sleep(1 + random.random())
+    return ""
+
+
+def fetch_videos(game, pages=1, retries=3):
+    """返回官方号视频投稿动态的文本列表（标题 + 简介）。
+
+    opus 接口只给图文正文，视频投稿拿不到简介，所以单独走动态列表接口，
+    从 modules.module_dynamic.major.archive 里取 title 和 desc。
+    """
+    uid = BILI_UIDS.get(game)
+    if not uid or requests is None:
+        return []
+
+    out = []
+    offset = ""
+    for page in range(1, pages + 1):
+        got = False
+        for attempt in range(retries):
+            session = _new_session()
+            session.headers["Referer"] = f"https://space.bilibili.com/{uid}/dynamic"
+            url = _signed_url(
+                session, DYNAMIC_API,
+                {"host_mid": uid, "offset": offset, "page": page, "type": "all"},
+            )
+            if not url:
+                time.sleep(2)
+                continue
+            try:
+                j = session.get(url, timeout=15).json()
+            except Exception:
+                time.sleep(2 + random.random())
+                continue
+            if j.get("code") != 0:
+                time.sleep(3 + random.random() * 2)
+                continue
+            data = j.get("data") or {}
+            items = data.get("items") or []
+            if not items and attempt < retries - 1:
+                # code=0 但一条都没有，多半是被限流了，歇一下再要
+                time.sleep(3 + random.random() * 3)
+                continue
+            for it in items:
+                modules = it.get("modules") or {}
+                md = modules.get("module_dynamic") or {}
+                major = md.get("major") or {}
+                arch = major.get("archive") if isinstance(major, dict) else None
+                if not isinstance(arch, dict):
+                    continue
+                pieces = []
+                title = str(arch.get("title") or "").strip()
+                desc = str(arch.get("desc") or "").strip()
+                bvid = str(arch.get("bvid") or "").strip()
+                # 简介长度顶着截断线，说明后面被切了，换个接口把全文要回来
+                if bvid and len(desc) >= DESC_TRUNCATED_LEN:
+                    full = _fetch_full_desc(session, bvid)
+                    if len(full) > len(desc):
+                        desc = full.strip()
+                    time.sleep(0.8 + random.random() * 0.7)
+                if title:
+                    pieces.append(title)
+                if desc:
+                    pieces.append(desc)
+                if not pieces:
+                    continue
+                author = modules.get("module_author") or {}
+                out.append({
+                    "text": "\n".join(pieces),
+                    "opus_id": it.get("id_str") or it.get("id"),
+                    "pub_time": author.get("pub_ts"),
+                    "kind": "video",
+                })
+            got = True
+            offset = str(data.get("offset") or "")
+            break
+        if not got:
+            continue
+        if not offset:
+            break
+        time.sleep(1 + random.random())
+    return out
 
 
 _VERSION_RE = re.compile(
@@ -305,6 +407,10 @@ def run_once(pages=1):
 
     for game in BILI_UIDS:
         items = fetch_opus(game, pages=pages)
+        try:
+            items += fetch_videos(game, pages=pages)
+        except Exception as e:
+            print(f"[song_fetcher] 视频简介抓取失败 {game}: {e}")
         game_known = known_by_game.get(game, set())
         hit = 0
         for item in items:
@@ -321,6 +427,7 @@ def run_once(pages=1):
                     "title": title,
                     "is_standard": True,
                     "source": "bilibili",
+                    "via": item.get("kind", "opus"),
                     "opus_id": item.get("opus_id"),
                     "pub_time": item.get("pub_time"),
                     "found_at": int(time.time()),
