@@ -1582,5 +1582,13 @@
   {
     "title": "True Home, True World",
     "is_standard": false
+  },
+  {
+    "title": "OMG",
+    "is_standard": true
+  },
+  {
+    "title": "STARGAZERS",
+    "is_standard": true
   }
 ]
