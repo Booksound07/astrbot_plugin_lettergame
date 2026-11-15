@@ -315,6 +315,6 @@
 
 ## 版本
 
-v3.1.0
+v3.1.1
 
 作者：ChatGPT & DeepSeek & Booksound07
