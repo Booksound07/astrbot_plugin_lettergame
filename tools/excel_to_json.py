@@ -219,7 +219,7 @@ def excel_to_json(excel_file=EXCEL_FILE, json_file=JSON_FILE):
 
     for row in rows[header_index + 1:]:
 
-        title = clean(row.get(title_col, ""))
+        title = " ".join(str(clean(row.get(title_col, ""))).split())
         if not title:
             continue
 
