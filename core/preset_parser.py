@@ -1,13 +1,16 @@
+from .matcher import normalize_spaces
+
+
 def parse_preset_lines(lines):
     result = []
     for line in lines:
-        line = line.strip()
+        line = normalize_spaces(line)
         if not line:
             continue
 
         if line.startswith("（装饰行）"):
             # 装饰行
-            text = line[len("（装饰行）"):].strip()
+            text = normalize_spaces(line[len("（装饰行）"):])
             result.append({
                 "type": "decor",
                 "text": text

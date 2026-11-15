@@ -2,6 +2,7 @@ from pathlib import Path
 import json
 import time
 
+from .matcher import normalize_spaces
 from .paths import BANK_DIR, ALIAS_DIR
 
 class SongBankManager:
@@ -26,12 +27,12 @@ class SongBankManager:
                 "title": song
             }
 
-        title = str(
+        title = normalize_spaces(
             song.get(
                 "title",
                 ""
             )
-        ).strip()
+        )
 
         return {
             **song,
@@ -77,16 +78,16 @@ class SongBankManager:
 
             if isinstance(song, str):
 
-                title = song.strip()
+                title = normalize_spaces(song)
 
             else:
 
-                title = str(
+                title = normalize_spaces(
                     song.get(
                         "title",
                         ""
                     )
-                ).strip()
+                )
 
             if title:
 
