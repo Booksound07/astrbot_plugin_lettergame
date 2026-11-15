@@ -14,6 +14,7 @@ from .core.alias_manager import (
     add_alias_to_file,
     remove_alias_from_file,
     sync_aliases_for_title,
+    alias_exists_anywhere,
 )
 from .core.daily_manager import daily_record, save_daily_record, load_daily_record
 from .core.search_engine import search_format_code, search_mask
@@ -42,6 +43,7 @@ from .core.helpers import (
 from .core.constants import *
 from .core import song_fetcher
 from .core.alias_approval import AliasApprovalManager
+from .core import review_log
 from .core.utils import is_revealed, get_initial, normalize_search, is_blank
 from .core.user_settings import (
     disable_bank, enable_bank,
@@ -2863,13 +2865,25 @@ class LetterGame(Star):
             return
 
         success = 0
+        logged = []
         for aid in approve_ids:
             item = approval_mgr.find_by_id(aid)
             if not item:
                 continue
+            added = not alias_exists_anywhere(item["bank"], item["title"], item["alias"])
             add_alias_to_file(item["bank"], item["title"], item["alias"])
             approval_mgr.remove(item)
             success += 1
+            logged.append({
+                "bank": item["bank"],
+                "title": item["title"],
+                "alias": item["alias"],
+                "user": item.get("user", ""),
+                "id": item.get("id"),
+                "added": added,
+            })
+        if logged:
+            review_log.log("alias", "approve", logged, by=event.get_sender_id(), note="通过")
 
         await event.send(event.plain_result(f"已通过 {success} 条别名申请。"))
 
@@ -2883,10 +2897,22 @@ class LetterGame(Star):
             await event.send(event.plain_result("当前没有待审核别名。"))
             return
         count = 0
+        logged = []
         for item in approval_mgr.list_all()[:]:
+            added = not alias_exists_anywhere(item["bank"], item["title"], item["alias"])
             add_alias_to_file(item["bank"], item["title"], item["alias"])
             count += 1
+            logged.append({
+                "bank": item["bank"],
+                "title": item["title"],
+                "alias": item["alias"],
+                "user": item.get("user", ""),
+                "id": item.get("id"),
+                "added": added,
+            })
         approval_mgr.clear()
+        if logged:
+            review_log.log("alias", "approve", logged, by=event.get_sender_id(), note="全部通过")
         await event.send(event.plain_result(f"已通过全部待审核别名，共 {count} 条。"))
 
     # ---------------------- 拒绝别名 ----------------------
@@ -2947,6 +2973,161 @@ class LetterGame(Star):
             lines.append(f"{item['id']}. {item['title']} -> {item['alias']} (提交者:{item['user']})")
         await event.send(event.plain_result("\n".join(lines)))
         
+    # ---------------------- 审核日志 ----------------------
+    @filter.command("别名日志")
+    async def show_alias_review_log(self, event: AstrMessageEvent):
+        event.call_llm = False
+        event.stop_event()
+        if not self.is_plugin_admin(event):
+            await event.send(event.plain_result("权限不足，仅管理员可操作。"))
+            return
+        await event.send(event.plain_result(review_log.format_text("alias", "别名")))
+
+    @filter.command("曲目日志")
+    async def show_song_review_log(self, event: AstrMessageEvent):
+        event.call_llm = False
+        event.stop_event()
+        if not self.is_plugin_admin(event):
+            await event.send(event.plain_result("只有管理员能用这个指令。"))
+            return
+        await event.send(event.plain_result(review_log.format_text("song", "曲目")))
+
+    def _parse_revert_times(self, raw):
+        raw = (raw or "").strip()
+        if not raw:
+            return 1
+        try:
+            n = int(raw)
+        except Exception:
+            return None
+        return n if n >= 1 else None
+
+    @filter.command("回退别名更改")
+    async def revert_alias_changes(self, event: AstrMessageEvent):
+        event.call_llm = False
+        event.stop_event()
+        if not self.is_plugin_admin(event):
+            await event.send(event.plain_result("权限不足，仅管理员可操作。"))
+            return
+
+        n = self._parse_revert_times(extract_args(event))
+        if n is None:
+            await event.send(event.plain_result("用法：/回退别名更改 [次数]，次数是正整数。"))
+            return
+
+        picks = review_log.recent_writes("alias", n)
+        if not picks:
+            await event.send(event.plain_result("没有可回退的别名更改。"))
+            return
+
+        removed = 0
+        restored = 0
+        for entry in picks:
+            for it in entry.get("items", []):
+                if it.get("added"):
+                    try:
+                        if remove_alias_from_file(
+                            it.get("bank", ""), it.get("title", ""), it.get("alias", "")
+                        ):
+                            removed += 1
+                    except Exception as e:
+                        logger.warning(f"[lettergame] 回退别名失败: {e}")
+                try:
+                    if approval_mgr.restore(it):
+                        restored += 1
+                except Exception as e:
+                    logger.warning(f"[lettergame] 恢复待审失败: {e}")
+
+        review_log.mark_reverted("alias", [e.get("seq") for e in picks])
+        review_log.log(
+            "alias", "revert",
+            [it for e in picks for it in e.get("items", [])],
+            by=event.get_sender_id(),
+            note=f"回退 {len(picks)} 次",
+        )
+        await event.send(event.plain_result(
+            f"已回退 {len(picks)} 次别名更改：撤销 {removed} 条已写入的别名，{restored} 条回到待审。"
+        ))
+
+    @filter.command("回退曲目更改")
+    async def revert_song_changes(self, event: AstrMessageEvent):
+        event.call_llm = False
+        event.stop_event()
+        if not self.is_plugin_admin(event):
+            await event.send(event.plain_result("只有管理员能用这个指令。"))
+            return
+
+        n = self._parse_revert_times(extract_args(event))
+        if n is None:
+            await event.send(event.plain_result("用法：/回退曲目更改 [次数]，次数是正整数。"))
+            return
+
+        picks = review_log.recent_writes("song", n)
+        if not picks:
+            await event.send(event.plain_result("没有可回退的曲目更改。"))
+            return
+
+        data = song_fetcher.load_pending()
+        pending = list(data.get("pending", []))
+        known = {
+            (x.get("game"), song_fetcher.norm_title(x.get("title", "")))
+            for x in pending
+        }
+
+        removed = 0
+        restored = 0
+        for entry in picks:
+            for it in entry.get("items", []):
+                game = it.get("game", "")
+                title = it.get("title", "")
+                try:
+                    removed += self._remove_songs_from_bank(
+                        game, [title], it.get("is_standard", True)
+                    )
+                except Exception as e:
+                    logger.warning(f"[lettergame] 回退曲目失败: {e}")
+
+                key = (game, song_fetcher.norm_title(title))
+                if not title or key in known:
+                    continue
+
+                item = it.get("item")
+                item = dict(item) if isinstance(item, dict) else {}
+                item.setdefault("game", game)
+                item.setdefault("title", title)
+                item.setdefault("is_standard", bool(it.get("is_standard", True)))
+
+                used = {x.get("id") for x in pending}
+                if not isinstance(item.get("id"), int) or item.get("id") in used:
+                    try:
+                        nid = int(data.get("next_id", 1) or 1)
+                    except Exception:
+                        nid = 1
+                    item["id"] = nid
+                    data["next_id"] = nid + 1
+
+                pending.append(item)
+                known.add(key)
+                restored += 1
+
+        data["pending"] = pending
+        song_fetcher.save_pending(data)
+        try:
+            bank_manager.force_reload()
+        except Exception:
+            pass
+
+        review_log.mark_reverted("song", [e.get("seq") for e in picks])
+        review_log.log(
+            "song", "revert",
+            [it for e in picks for it in e.get("items", [])],
+            by=event.get_sender_id(),
+            note=f"回退 {len(picks)} 次",
+        )
+        await event.send(event.plain_result(
+            f"已回退 {len(picks)} 次曲目更改：从题库撤销 {removed} 条，{restored} 条回到待审。"
+        ))
+
     @filter.command("比赛模式")
     async def competition_mode(self, event: AstrMessageEvent, args: str = ""):
         # 确定对话ID
@@ -3039,7 +3220,12 @@ class LetterGame(Star):
             await event.send(event.plain_result("请输入正确数字。"))
 
     # ---------------------- 曲目待审（B站巡检产出） ----------------------
-    def _write_songs_to_bank(self, game, titles, is_standard=True):
+    def _write_songs_to_bank_ex(self, game, titles, is_standard=True):
+        """写曲目进内置题库，返回真正写进去的曲名列表。
+
+        题库允许重名（Phigros 自己就有两首 Another Me），
+        所以不拿库里已有的同名曲做判重，传进来什么就写什么。
+        """
         import json as _json
         bank_dir = song_fetcher.BANK_DIR / game
         bank_dir.mkdir(parents=True, exist_ok=True)
@@ -3048,22 +3234,80 @@ class LetterGame(Star):
         if f.exists():
             with open(f, "r", encoding="utf-8") as fp:
                 songs = _json.load(fp)
-        exist = set()
-        for s in songs:
-            t = s.get("title") if isinstance(s, dict) else s
-            if t:
-                exist.add(song_fetcher.norm_title(t))
-        added = 0
+        added = []
         for t in titles:
-            k = song_fetcher.norm_title(t)
-            if not k or k in exist:
+            t = song_fetcher.normalize_spaces(t)
+            if not t or not song_fetcher.norm_title(t):
                 continue
             songs.append({"title": t, "is_standard": is_standard})
-            exist.add(k)
-            added += 1
-        with open(f, "w", encoding="utf-8") as fp:
-            _json.dump(songs, fp, ensure_ascii=False, indent=2)
+            added.append(t)
+        if added:
+            with open(f, "w", encoding="utf-8") as fp:
+                _json.dump(songs, fp, ensure_ascii=False, indent=2)
         return added
+
+    def _write_songs_to_bank(self, game, titles, is_standard=True):
+        return len(self._write_songs_to_bank_ex(game, titles, is_standard))
+
+    def _remove_songs_from_bank(self, game, titles, is_standard=None):
+        """从内置题库删掉指定曲目，返回实际删掉的条数。回退用。
+
+        题库允许重名，所以每首曲只删一条，不会顺手把另一首同名曲带走。
+        审核写入是追加到列表末尾的，因此从后往前找；
+        给了 is_standard 就优先删标记一致的那条。
+        """
+        import json as _json
+        if not game or not titles:
+            return 0
+        f = song_fetcher.BANK_DIR / game / "songs.json"
+        if not f.exists():
+            return 0
+        try:
+            with open(f, "r", encoding="utf-8") as fp:
+                songs = _json.load(fp)
+        except Exception:
+            return 0
+        pairs = []
+        for t in titles:
+            if not t:
+                continue
+            k = song_fetcher.norm_title(t)
+            if k:
+                pairs.append((str(t), k))
+        if not pairs:
+            return 0
+        # 匹配优先级：逐字相等且标记一致 > 逐字相等 > 归一化后标记一致 > 归一化
+        # 只差空格的曲名（orzmic 的 Headache 和 Hea Dac He）在前两档就能分开
+        passes = ((True, True), (True, False), (False, True), (False, False))
+        removed = 0
+        for name, key in pairs:
+            idx = None
+            for exact, need_std in passes:
+                if idx is not None:
+                    break
+                for i in range(len(songs) - 1, -1, -1):
+                    s = songs[i]
+                    t = s.get("title") if isinstance(s, dict) else s
+                    if not t:
+                        continue
+                    if exact:
+                        if t != name:
+                            continue
+                    elif song_fetcher.norm_title(t) != key:
+                        continue
+                    if need_std and is_standard is not None:
+                        std = bool(s.get("is_standard", True)) if isinstance(s, dict) else True
+                        if std != bool(is_standard):
+                            continue
+                    idx = i
+                    break
+            if idx is not None:
+                songs.pop(idx)
+                removed += 1
+        if removed:
+            with open(f, "w", encoding="utf-8") as fp:
+                _json.dump(songs, fp, ensure_ascii=False, indent=2)
+        return removed
 
     # ---------------------- 题库导入（Excel） ----------------------
     @filter.command("导入题库")
@@ -3396,11 +3640,19 @@ class LetterGame(Star):
             by_game.setdefault(x["game"], []).append(x)
 
         total = 0
+        written = []
         for game, items in by_game.items():
             std = [x["title"] for x in items if x.get("is_standard", True)]
             non = [x["title"] for x in items if not x.get("is_standard", True)]
-            total += self._write_songs_to_bank(game, std, True)
-            total += self._write_songs_to_bank(game, non, False)
+            for grp, flag in ((std, True), (non, False)):
+                for t in self._write_songs_to_bank_ex(game, grp, flag):
+                    total += 1
+                    written.append({
+                        "game": game,
+                        "title": t,
+                        "is_standard": flag,
+                        "item": next((x for x in items if x.get("title") == t), None),
+                    })
             for t in std:
                 try:
                     sync_aliases_for_title(t)
@@ -3411,6 +3663,8 @@ class LetterGame(Star):
         data["pending"] = [x for x in pending if x.get("id") not in done]
         song_fetcher.save_pending(data)
         bank_manager.force_reload()
+        if written:
+            review_log.log("song", "approve", written, by=event.get_sender_id(), note="通过曲目")
         await event.send(event.plain_result(f"通过 {len(picked)} 条，实际写入 {total} 条。"))
 
     @filter.command("拒绝曲目", alias={"songreject"})
@@ -3473,11 +3727,19 @@ class LetterGame(Star):
         for x in pending:
             by_game.setdefault(x["game"], []).append(x)
         total = 0
+        written = []
         for game, items in by_game.items():
             std = [x["title"] for x in items if x.get("is_standard", True)]
             non = [x["title"] for x in items if not x.get("is_standard", True)]
-            total += self._write_songs_to_bank(game, std, True)
-            total += self._write_songs_to_bank(game, non, False)
+            for grp, flag in ((std, True), (non, False)):
+                for t in self._write_songs_to_bank_ex(game, grp, flag):
+                    total += 1
+                    written.append({
+                        "game": game,
+                        "title": t,
+                        "is_standard": flag,
+                        "item": next((x for x in items if x.get("title") == t), None),
+                    })
             for t in std:
                 try:
                     sync_aliases_for_title(t)
@@ -3486,6 +3748,8 @@ class LetterGame(Star):
         data["pending"] = []
         song_fetcher.save_pending(data)
         bank_manager.force_reload()
+        if written:
+            review_log.log("song", "approve", written, by=event.get_sender_id(), note="全部通过曲目")
         await event.send(event.plain_result(f"已通过全部待审核曲目，共 {len(pending)} 条，实际写入 {total} 条。"))
 
     @filter.command("全部拒绝曲目")
