@@ -6,6 +6,8 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import List, Dict, Tuple
 
+from .matcher import normalize_spaces
+
 # 零宽类字符，肉眼完全看不到，但会让匹配对不上
 ZERO_WIDTH = {"\u200b", "\ufeff"}
 
@@ -134,7 +136,7 @@ def parse_excel(file_path: Path, title_column: str, standard_column: str) -> Tup
     duplicates = []
 
     for row in rows[1:]:
-        title = normalize_ws(str(row.get(title_col, ""))).strip()
+        title = normalize_spaces(str(row.get(title_col, "")))
         if not title:
             continue
 

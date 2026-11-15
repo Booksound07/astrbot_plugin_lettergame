@@ -4,6 +4,8 @@ import time
 import shutil
 from pathlib import Path
 
+from .matcher import normalize_spaces
+
 PLUGIN_DATA_DIR = Path.home() / ".astrbot" / "data" / "plugin_data" / "astrbot_plugin_lettergame"
 # ========== 目录安全防护 ==========
 _SAFE_SEG = re.compile(r"^[0-9A-Za-z_.\-]{1,64}$")
@@ -92,6 +94,23 @@ def _get_user_dir(user_id: str) -> Path:
 def _build_format_code(title: str) -> str:
     return "-".join(str(len(word)) for word in title.split())
 
+
+def _normalize_songs(songs: list) -> list:
+    """上传进来的曲名统一空格，别让全角空格、不间断空格和双空格混进题库。
+    返回的是新列表，不改调用方手里那份。"""
+    out = []
+    for song in songs or []:
+        if isinstance(song, str):
+            title = normalize_spaces(song)
+            if title:
+                out.append({"title": title})
+            continue
+        if isinstance(song, dict):
+            title = normalize_spaces(song.get("title", ""))
+            if title:
+                out.append({**song, "title": title})
+    return out
+
 # ========== 权限检查 ==========
 def _can_view_bank(user_id: str, bank_entry: dict) -> bool:
     """检查用户是否可以查看此题库（创建者或被共享）"""
@@ -117,6 +136,7 @@ def _can_edit_bank(user_id: str, bank_entry: dict) -> str:
 # ========== 题库操作 ==========
 def create_bank(user_id: str, name: str, songs: list, meta_info: dict) -> int:
     """创建自定义题库，返回新题库ID（全局唯一）"""
+    songs = _normalize_songs(songs)
     index = _get_global_index()
     bank_id = index["next_id"]
     index["next_id"] += 1
@@ -179,6 +199,7 @@ def create_bank(user_id: str, name: str, songs: list, meta_info: dict) -> int:
 
 def overwrite_bank(user_id: str, bank_id: int, name: str, songs: list, meta_info: dict) -> bool:
     """覆盖旧题库（保留ID），保留别名文件"""
+    songs = _normalize_songs(songs)
     index = _get_global_index()
     
     # 查找题库

@@ -15,10 +15,13 @@ except ImportError:
     requests = None
 
 try:
-    from .matcher import strip_trailing_brackets
+    from .matcher import normalize_spaces, strip_trailing_brackets
 except Exception:
     def strip_trailing_brackets(t):
         return str(t).strip()
+
+    def normalize_spaces(t):
+        return " ".join(str(t).split())
 
 from .paths import BANK_DIR
 DATA_DIR = (
@@ -270,7 +273,7 @@ def extract_titles(text):
     """只认「曲名」 by: 这种；「与音乐游戏「X」联动」里的 X 是游戏名，不带 by，天然被排除"""
     out = []
     for raw in _TITLE_RE.findall(str(text)):
-        t = raw.strip()
+        t = normalize_spaces(raw)
         if not t:
             continue
         if t.lower().startswith("by:"):
