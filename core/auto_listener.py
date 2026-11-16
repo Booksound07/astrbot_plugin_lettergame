@@ -4,6 +4,7 @@ import math
 from astrbot.api import logger
 from difflib import SequenceMatcher
 from .matcher import match_answer
+from .answer_parser import parse_numbered_answer
 from .llm_matcher import llm_match
 from .alias_manager import get_shared_aliases
 from .helpers import send_question_board
@@ -45,18 +46,6 @@ class AutoListener:
         self.context = context
         self.llm_matcher_provider_id = llm_matcher_provider_id
 
-    def extract_guess_content(self, text: str):
-        """
-        检测消息是否以序号开头，提取序号后面的内容
-        支持格式：1. 1、 1． 1。 1.  1)  1） 等
-        返回：(序号, 提取的内容) 或 (None, 原文本)
-        """
-        pattern = r'^(\d+)[.、．。)\]）]?\s*(.*)$'
-        match = re.match(pattern, text.strip())
-        if match:
-            return int(match.group(1)), match.group(2).strip()
-        return None, text.strip()
-
     def _find_question_by_index(self, st, idx):
         """根据序号查找题目（1-based）"""
         question_idx = idx - 1
@@ -67,7 +56,7 @@ class AutoListener:
             return None
         return q
 
-    async def _mark_correct(self, event, st, target_question):
+    async def _mark_correct(self, event, st, target_question, question_idx):
         """标记题目为已答对，返回 (True, 回复消息)"""
         if target_question.get("solved", False):
             return True, None
@@ -80,8 +69,11 @@ class AutoListener:
         user_id = event.get_sender_id()
         user_name = event.get_sender_name()
 
-        question_idx = st["questions"].index(target_question)
         idx = question_idx + 1
+
+        # 答题前已开的字母数，必须在覆盖 mask 之前取，否则恒等于满开
+        old_mask = target_question.get("mask", "")
+        opened_letters = sum(1 for c in old_mask if c != '*' and c != ' ')
 
         # 更新题目状态
         target_question["mask"] = target_question["entry"]["title"]
@@ -108,9 +100,6 @@ class AutoListener:
 
             self.gm.init_player_state(group_id, user_id)
             state = self.gm.update_player_state(group_id, user_id, True, timestamp)
-
-            old_mask = target_question["mask"]
-            opened_letters = sum(1 for c in old_mask if c != '*' and c != ' ')
 
             difficulty_multiplier = get_difficulty_multiplier(
                 target_question,
@@ -169,7 +158,7 @@ class AutoListener:
         await event.send(event.plain_result(reply))
 
         # ===== 检查是否全部完成 =====
-        all_done = all(q.get("solved", True) for q in st["questions"] if q.get("type") != "decor")
+        all_done = all(q.get("solved", False) for q in st["questions"] if q.get("type") != "decor")
 
         if all_done:
             # 全部完成，直接发送完成消息（含完整答案）
@@ -217,179 +206,108 @@ class AutoListener:
 
         return True, None
 
-    async def _silent_guess(self, event, st, guess_text, user_id):
-        """静默猜题：只判对，不判错"""
-        if not guess_text:
-            return False, None
-
-        unsolved = [q for q in st["questions"] if q.get("type") != "decor" and not q.get("solved", False)]
-        if not unsolved:
-            return False, None
-
-        target_question = None
-
-        # 阶段1：普通匹配（曲名/别名精确匹配）
-        for q in unsolved:
-            entry = q["entry"]
-            aliases = get_shared_aliases(entry["title"], self.bank_manager, user_id)
-            candidates = [entry["title"]] + aliases
-            if match_answer(guess_text, candidates):
-                target_question = q
-                break
-            
-        # 阶段2：字符串相似度匹配
-        if target_question is None:
-
-            best_question = None
-            best_similarity = 0.0
-            best_candidate = None
-
-            for q in unsolved:
-                entry = q["entry"]
-
-                aliases = get_shared_aliases(
-                    entry["title"],
-                    self.bank_manager,
-                    user_id
-                )
-
-                candidates = [entry["title"]] + aliases
-
-                for candidate in candidates:
-                    similarity = calculate_similarity(
-                        guess_text,
-                        candidate
-                    )
-
-                    if similarity > best_similarity:
-                        best_similarity = similarity
-                        best_question = q
-                        best_candidate = candidate
-
-            # ===== 字符相似度日志 =====
-            if best_question is not None:
-                hit = best_similarity >= STRING_SIMILARITY_THRESHOLD
-
-                logger.info(
-                    f"[开字母] 字符相似度判定 | "
-                    f"输入={guess_text!r} | "
-                    f"最佳匹配={best_candidate!r} | "
-                    f"对应题目={best_question['entry']['title']!r} | "
-                    f"相似度={best_similarity:.1f}% | "
-                    f"阈值={STRING_SIMILARITY_THRESHOLD}% | "
-                    f"命中={'是' if hit else '否'}"
-                )
-
-            if best_similarity >= STRING_SIMILARITY_THRESHOLD:
-                target_question = best_question
-
-        # 阶段3：LLM 匹配（复用 llm_match）
-        if target_question is None:
-            
-            logger.info(
-                f"[开字母] 字符相似度未命中，进入 LLM 判定 | "
-                f"输入={guess_text!r}"
-            )
-            
-            # 全部题目都送进去，已答出的打标记，题号用板上的真实编号，
-            # 免得未解列表重新排序后模型回报的题号对不上
-            all_entries = []
-
-            for question_no, q in enumerate(st["questions"], 1):
-                if q.get("type") == "decor":
-                    continue
-
-                entry = q["entry"]
-
-                aliases = get_shared_aliases(
-                    entry["title"],
-                    self.bank_manager,
-                    user_id
-                )
-
-                all_entries.append({
-                    "number": question_no,
-                    "title": entry["title"],
-                    "aliases": aliases,
-                    "solved": bool(q.get("solved", False))
-                })
-
-            try:
-                status, target_entry = await llm_match(
-                    self.context,
-                    event,
-                    guess_text,
-                    all_entries,
-                    provider_id=self.llm_matcher_provider_id
-                )
-
-                # 模型说这题已经答过了：静默猜题不吭声，也不扣分
-                if status == "solved":
-                    logger.info(
-                        f"[开字母] LLM 判定为已答出的题 | 输入={guess_text!r}"
-                    )
-                    return False, None
-
-                if status == "match" and target_entry is not None:
-                    target_no = target_entry.get("number")
-                    for question_no, q in enumerate(st["questions"], 1):
-                        if q.get("type") == "decor" or q.get("solved", False):
-                            continue
-                        if question_no == target_no:
-                            target_question = q
-                            break
-            except Exception as e:
-                logger.error(f"静默LLM匹配异常：{repr(e)}")
-
-        if target_question is None:
-            # 比赛模式下，答错要扣分/断连击
-            group_id = event.get_group_id()
-            if not group_id:
-                group_id = f"private_{event.get_sender_id()}"
-            group_id = str(group_id)
-            if self.gm.is_competition_mode(group_id):
-                self.gm.update_player_state(
-                    group_id,
-                    user_id,
-                    False,
-                    time.time()
-                )
-            return False, None
-
-        await self._mark_correct(event, st, target_question)
-        return True, None
-
     async def handle_message(self, event, st):
+        """静默作答：只认「数字 空格 正文」，判对才吭声
+
+        - 纯曲名、1Song、1.abc、只发数字：一律不算作答，连断连击都不做
+        - 序号非法（前导零、0、越界、装饰行）：同样静默不理会
+        - 多行作答：不判定对错，也不改连击
+        """
         text = event.message_str.strip()
         user_id = event.get_sender_id()
 
-        idx, guess_content = self.extract_guess_content(text)
-        if idx is None:
+        status, number, content = parse_numbered_answer(
+            text,
+            len(st["questions"])
+        )
+
+        # 多行作答：不判定，不判对也不判错，也不断连击
+        if status == "multi":
+            logger.info("[开字母] 静默链路检测到多行作答，本次不判定")
             return False, None
-        
-        # 只发一个数字（没有实际内容），不算回答
-        if not guess_content:
+
+        if status != "ok":
             return False, None
 
-        total_questions = len([q for q in st["questions"] if q.get("type") != "decor"])
-        q = self._find_question_by_index(st, idx)
+        q = self._find_question_by_index(st, number)
 
-        # 情况1：序号超出范围 → 传 text（包含序号）
-        if idx > total_questions or idx < 1:
-            return await self._silent_guess(event, st, text, user_id)
-
-        # 情况2：序号对应的题目不存在或已解决 → 静默（不进入 LLM）
+        # 越界、装饰行、已经答过：静默不理会
         if q is None or q.get("solved", False):
             return False, None
 
-        # 情况3：序号有效且题目未完成
         entry = q["entry"]
         aliases = get_shared_aliases(entry["title"], self.bank_manager, user_id)
         candidates = [entry["title"]] + aliases
 
-        if match_answer(guess_content, candidates) or match_answer(text, candidates):
-            await self._mark_correct(event, st, q)
+        # 阶段1：曲名/别名精确匹配
+        if match_answer(content, candidates):
+            await self._mark_correct(event, st, q, number - 1)
             return True, None
 
-        # 序号有效但匹配失败 → 进入 LLM，传 text（包含序号）
-        return await self._silent_guess(event, st, text, user_id)
+        # 阶段2：字符相似度
+        best_similarity = 0.0
+        best_candidate = None
+
+        for candidate in candidates:
+            similarity = calculate_similarity(content, candidate)
+            if similarity > best_similarity:
+                best_similarity = similarity
+                best_candidate = candidate
+
+        logger.info(
+            f"[开字母] 静默作答字符相似度 | 输入={content!r} | "
+            f"最佳匹配={best_candidate!r} | 对应题目={entry['title']!r} | "
+            f"相似度={best_similarity:.1f}% | 阈值={STRING_SIMILARITY_THRESHOLD}% | "
+            f"命中={'是' if best_similarity >= STRING_SIMILARITY_THRESHOLD else '否'}"
+        )
+
+        if best_similarity >= STRING_SIMILARITY_THRESHOLD:
+            await self._mark_correct(event, st, q, number - 1)
+            return True, None
+
+        # 阶段3：单题 LLM 判定
+        try:
+            result, _ = await llm_match(
+                self.context,
+                event,
+                content,
+                {"title": entry["title"], "aliases": aliases},
+                provider_id=self.llm_matcher_provider_id
+            )
+        except Exception as e:
+            logger.error(f"静默LLM匹配异常：{repr(e)}")
+            result = "error"
+
+        if result == "match":
+            await self._mark_correct(event, st, q, number - 1)
+            return True, None
+
+        # -1：模型判定为与开字母无关的日常讨论，不断连击
+        if result == "irrelevant":
+            logger.info("[开字母] 静默作答判定为无关讨论，不断连击")
+            return False, None
+
+        # 模型异常（空返回/格式错/超范围）：判不了就不判错
+        if result == "error":
+            logger.warning("[开字母] 判定失败，静默作答不判错")
+            return False, None
+
+        self._punish_silent(event)
+        return False, None
+
+    def _punish_silent(self, event):
+        """静默链路答错：比赛模式下断连击，不吭声"""
+        group_id = event.get_group_id()
+        if not group_id:
+            group_id = f"private_{event.get_sender_id()}"
+        group_id = str(group_id)
+
+        if self.gm.is_competition_mode(group_id):
+            self.gm.update_player_state(
+                group_id,
+                event.get_sender_id(),
+                False,
+                time.time()
+            )
+            # 断连击也要落盘，否则只改了内存里的状态
+            self.gm.save()

@@ -52,28 +52,39 @@ def extract_args(event: AstrMessageEvent) -> str:
 
 from .board_builder import build_question_board
 
-async def send_question_board(event, st, extra_text=""):
+async def send_question_board(event, st, extra_text="", quote=False):
     """
     根据题目数量决定发送文本还是图片
     :param event: 事件对象
     :param st: 游戏状态
     :param extra_text: 额外附加的文本（如开启人、猜题提示），会显示在题面前
+    :param quote: 是否引用触发这次刷新的那条消息（开字母、猜对、开提示后都该引）
     """
+    from .quote import quote_image_result, quote_result
+
+    # quote 为假时不能用 event.plain_result 本身：它已绑定 self，再传 event 就会多一个参数
+    if quote:
+        text_result = quote_result
+        image_result = quote_image_result
+    else:
+        text_result = lambda e, t: e.plain_result(t)
+        image_result = lambda e, p: e.image_result(p)
+
     # 计算真实题目数（排除装饰行）
     question_count = sum(1 for q in st["questions"] if q.get("type") != "decor")
     if question_count > 15:
         # 先发送额外文字（如果有）
         if extra_text:
-            await event.send(event.plain_result(extra_text))
+            await event.send(text_result(event, extra_text))
         # 生成图片
         from .board_image_renderer import render_board_image
         img_path = render_board_image(st["questions"], st.get("open_chars", []))
-        await event.send(event.image_result(img_path))
+        await event.send(image_result(event, img_path))
     else:
         board = build_question_board(st)
         if extra_text:
             board = extra_text + "\n" + board
-        await event.send(event.plain_result(board))
+        await event.send(text_result(event, board))
         
 def get_daily_seed_date() -> datetime.date:
     """获取每日挑战的种子日期。凌晨4点前用前一天，4点后用当天"""
