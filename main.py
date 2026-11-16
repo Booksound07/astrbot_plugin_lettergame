@@ -16,7 +16,12 @@ from .core.alias_manager import (
     sync_aliases_for_title,
     alias_exists_anywhere,
 )
-from .core.daily_manager import daily_record, save_daily_record, load_daily_record
+from .core.daily_manager import (
+    save_daily_record,
+    load_daily_record,
+    get_daily_record,
+    set_daily_record,
+)
 from .core.search_engine import search_format_code, search_mask
 from .core.query_parser import parse_query
 from .core.song_info import show_song_info
@@ -40,6 +45,7 @@ from .core.helpers import (
     require_group_at, get_game_state, is_admin, exact_command, extract_args,
     send_question_board, set_plugin_admins
 )
+from .core.quote import quote_result, quote_send
 from .core.constants import *
 from .core import song_fetcher
 from .core.alias_approval import AliasApprovalManager
@@ -89,6 +95,7 @@ from .core.upload_handler import (
 )
 
 from .core.auto_listener import AutoListener
+from .core.answer_parser import parse_numbered_answer
 
 from .core.helpers import get_daily_seed_date, get_daily_expire_timestamp
 
@@ -1139,7 +1146,7 @@ class LetterGame(Star):
                 q["solved"] = True
 
         gm.save()
-        await send_question_board(event, st, "")
+        await send_question_board(event, st, "", quote=True)
 
     # ---------------------- 提示 ----------------------
     @filter.command("tip", alias={"提示"})
@@ -1227,8 +1234,8 @@ class LetterGame(Star):
             gm.increment_tip_count(group_id)
 
             gm.save()
-            await send_question_board(event, st, "")
-            await event.send(event.plain_result(f"提示揭开了字母：{ch}"))
+            await send_question_board(event, st, "", quote=True)
+            await quote_send(event, f"提示揭开了字母：{ch}")
         else:
             # 理论上不会发生，但以防万一
             await event.send(event.plain_result("提示失败，请重试。"))
@@ -1266,7 +1273,7 @@ class LetterGame(Star):
         for q in st["questions"]:
             if q.get("type") != "decor":
                 q["mask"] = q["entry"]["title"]
-        await send_question_board(event, st, extra)
+        await send_question_board(event, st, extra, quote=True)
 
         # 检查是否为预设，记录首次通关（独立于 players）
         if preset_id is not None:
@@ -1358,8 +1365,7 @@ class LetterGame(Star):
             display_name = "全部题库"
 
         # ===== 检查今日挑战是否已经做过 =====
-        daily_key = f"{group_id_str}_{target_bank}"
-        if daily_record.get(daily_key) == today_str:
+        if get_daily_record(group_id_str, target_bank) == today_str:
             await event.send(event.plain_result(f"本群今日的 {display_name} 每日挑战已经开启过了，请明天再来。"))
             return
 
@@ -1445,7 +1451,7 @@ class LetterGame(Star):
         st["format_code_counts"] = snapshot
         gm.save()
 
-        daily_record[daily_key] = today_str
+        set_daily_record(group_id_str, target_bank, today_str)
         save_daily_record()
 
         # ===== 发送题面 =====
@@ -2099,13 +2105,42 @@ class LetterGame(Star):
 
         guess_text = extract_args(event)
         if not guess_text:
-            await event.send(event.plain_result("用法：/猜 [曲名] 或 /guess [曲名]"))
+            await event.send(event.plain_result("用法：/猜 序号 曲名（例如 /猜 3 The Chariot）"))
             return
 
-        _, reply = await guess_handler.handle_guess(event, st, guess_text)
+        status, number, content = parse_numbered_answer(
+            guess_text,
+            len(st["questions"])
+        )
+
+        # 格式不对（只发数字、数字后直接贴内容、数字跟标点）：说明用法
+        if status in ("no_content", "no_number"):
+            await event.send(
+                quote_result(event, "用法：/猜 序号 曲名（例如 /猜 3 The Chariot）")
+            )
+            return
+
+        # 序号非法：前导零、0、越界
+        if status == "bad_number":
+            await event.send(quote_result(event, "无效的序号。"))
+            return
+
+        # 多行作答：不判定，不判对也不判错
+        if status == "multi":
+            await event.send(quote_result(event, "一次只能答一题，这条不作判定。"))
+            return
+
+        # 装饰行占位，按越界处理
+        if st["questions"][number - 1].get("type") == "decor":
+            await event.send(quote_result(event, "无效的序号。"))
+            return
+
+        _, reply = await guess_handler.handle_guess(event, st, content, number)
         if gm.get_first_open_time(group_id) is None:
             gm.set_first_open_time(group_id, time.time())
-        await event.send(event.plain_result(reply))
+        # 答对时 handler 已经自己发过消息，reply 为空，别再补一条空的
+        if reply:
+            await event.send(quote_result(event, reply))
 
     # ---------------------- 查询歌曲（仅查询已启用题库） ----------------------
     @filter.command("查询", alias={"search"})
